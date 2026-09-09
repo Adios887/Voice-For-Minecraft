@@ -165,10 +165,11 @@ function pollWorldId(mcSocket, onFound) {
     const statusMessage = body?.statusMessage || "";
     console.log("[mc] scoreboard objectives list ->", statusMessage);
     // พยายาม parse หลายรูปแบบ เผื่อรูปแบบข้อความต่างกันไปตามเวอร์ชันเกม
+    // (ยืนยันจากการทดสอบจริงแล้วว่ารูปแบบที่พบคือ:
+    //  "vcmc_data: displays as 'ค่า' and is type 'dummy'")
     const patterns = [
-      /vcmc_data[^:]*:\s*'([^']*)'/,
-      /vcmc_data[^:]*:\s*"([^"]*)"/,
-      /vcmc_data\s*=\s*([^\s,]+)/,
+      /vcmc_data[\s\S]*?'([^']*)'/,
+      /vcmc_data[\s\S]*?"([^"]*)"/,
     ];
     for (const re of patterns) {
       const m = statusMessage.match(re);
