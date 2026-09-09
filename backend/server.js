@@ -131,8 +131,12 @@ function genCode() {
   return code;
 }
 
-function sendCommand(mcSocket, commandLine) {
+function sendCommand(mcSocket, commandLine, onResponse) {
   const requestId = crypto.randomUUID();
+  if (onResponse) {
+    mcSocket._pendingCommands = mcSocket._pendingCommands || new Map();
+    mcSocket._pendingCommands.set(requestId, onResponse);
+  }
   mcSocket.send(
     JSON.stringify({
       header: { version: 1, requestId, messagePurpose: "commandRequest" },
@@ -150,18 +154,45 @@ function subscribeEvent(mcSocket, eventName) {
   );
 }
 
+// ดึงข้อมูล worldId + hostName ที่ behavior pack เก็บไว้แบบเงียบ ๆ ใน
+// scoreboard objective ชื่อ "vcmc_data" (ไม่ขึ้นแชท ไม่สแปม) โดยยิง
+// คำสั่ง "scoreboard objectives list" แล้วอ่านค่าจาก statusMessage ที่
+// ตอบกลับมา (ใช้กลไก commandRequest/commandResponse เดียวกับที่พิสูจน์
+// แล้วว่าใช้งานได้จริงตลอดโปรเจกต์นี้ - ต่างจากการอ่านจาก PlayerMessage
+// ที่พบว่าไม่จับข้อความที่สคริปต์ส่งเอง)
+function pollWorldId(mcSocket, onFound) {
+  sendCommand(mcSocket, "scoreboard objectives list", (body) => {
+    const statusMessage = body?.statusMessage || "";
+    console.log("[mc] scoreboard objectives list ->", statusMessage);
+    // พยายาม parse หลายรูปแบบ เผื่อรูปแบบข้อความต่างกันไปตามเวอร์ชันเกม
+    const patterns = [
+      /vcmc_data[^:]*:\s*'([^']*)'/,
+      /vcmc_data[^:]*:\s*"([^"]*)"/,
+      /vcmc_data\s*=\s*([^\s,]+)/,
+    ];
+    for (const re of patterns) {
+      const m = statusMessage.match(re);
+      if (m) {
+        const parts = m[1].split("|");
+        if (parts.length === 2) {
+          onFound(parts[0], parts[1]);
+          return;
+        }
+      }
+    }
+  });
+}
+
 // ------------------------------------------------------------------
 // การเชื่อมต่อจากฝั่ง Minecraft (/wsserver ws://.../)
 // ------------------------------------------------------------------
 wssMc.on("connection", (mcSocket) => {
-  // ยังไม่รู้ตัวตนของโลก/เซิร์ฟเวอร์นี้ในตอนแรก ต้องรอข้อความ
-  // "[vcmc-id]<worldId>|<hostName>" ที่ behavior pack ส่งมาก่อน
-  // (ส่งซ้ำทุก ๆ ไม่กี่วินาที เผื่อพลาดรอบแรก)
+  // ยังไม่รู้ตัวตนของโลก/เซิร์ฟเวอร์นี้ในตอนแรก ต้อง poll หา worldId
+  // จาก scoreboard ก่อน (ดูฟังก์ชัน pollWorldId ด้านบน)
   let session = null;
 
   console.log("[mc] มีการเชื่อมต่อเข้ามา กำลังรอ worldId...");
 
-  subscribeEvent(mcSocket, "PlayerMessage");
   subscribeEvent(mcSocket, "PlayerTravelled");
 
   sendCommand(
@@ -192,6 +223,19 @@ wssMc.on("connection", (mcSocket) => {
     );
   }
 
+  // ยิงถามซ้ำทุก 2 วินาที จนกว่าจะได้ worldId (behavior pack อาจยัง
+  // ไม่ทันสร้าง scoreboard ตอนที่เพิ่งเชื่อมต่อ)
+  const pollIntervalId = setInterval(() => {
+    if (session || mcSocket.readyState !== mcSocket.OPEN) {
+      clearInterval(pollIntervalId);
+      return;
+    }
+    pollWorldId(mcSocket, (worldId, hostName) => {
+      if (!session) setupSession(worldId, hostName);
+      clearInterval(pollIntervalId);
+    });
+  }, 2000);
+
   mcSocket.on("message", (raw) => {
     let msg;
     try {
@@ -199,17 +243,18 @@ wssMc.on("connection", (mcSocket) => {
     } catch {
       return;
     }
-    const eventName = msg.body?.eventName;
 
-    // ข้อความจาก behavior pack ที่บอก worldId ถาวร + ชื่อเจ้าของห้อง
-    if (eventName === "PlayerMessage") {
-      const text = (msg.body?.message || "").replace(/§./g, "");
-      const match = text.match(/^\[vcmc-id\](.+)\|(.+)$/);
-      if (match && !session) {
-        setupSession(match[1], match[2]);
+    // ผลตอบกลับของคำสั่งที่เคยส่งไปพร้อม callback (ใช้กับ pollWorldId)
+    if (msg.header?.messagePurpose === "commandResponse") {
+      const cb = mcSocket._pendingCommands?.get(msg.header.requestId);
+      if (cb) {
+        mcSocket._pendingCommands.delete(msg.header.requestId);
+        cb(msg.body);
       }
       return;
     }
+
+    const eventName = msg.body?.eventName;
 
     // ตำแหน่งผู้เล่น -> เก็บไว้เพื่อคำนวณ proximity แล้วส่งให้เว็บไซต์
     if (eventName === "PlayerTravelled" && session) {
@@ -361,4 +406,3 @@ setInterval(() => {
     ws.ping();
   });
 }, 15000);
-                                               
