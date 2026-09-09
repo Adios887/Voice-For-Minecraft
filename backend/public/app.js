@@ -53,6 +53,8 @@ const state = {
   muted: false,
   ws: null,
   localStream: null,
+  micReady: false, // true เมื่อขอสิทธิ์ไมค์สำเร็จแล้วเท่านั้น
+  pendingPeerNames: null, // เก็บรายชื่อ peers ที่มาก่อนไมค์จะพร้อม
   audioCtx: null,
   analyser: null,
   peers: new Map(), // playerName -> RTCPeerConnection
@@ -205,7 +207,13 @@ function handleServerMessage(msg) {
     return;
   }
   if (msg.type === "peers") {
-    syncPeers(msg.peers);
+    // ห้ามเปิดการเชื่อมต่อ WebRTC ก่อนไมค์พร้อม ไม่งั้นเสียงตัวเองจะไม่
+    // ถูกแนบไปในการเจรจาเชื่อมต่อรอบแรก (สาเหตุของปัญหาเสียงทางเดียว)
+    if (!state.micReady) {
+      state.pendingPeerNames = msg.peers;
+    } else {
+      syncPeers(msg.peers);
+    }
     return;
   }
   if (msg.type === "signal") {
@@ -234,6 +242,14 @@ async function startMic() {
   } catch (err) {
     els.muteLabel.textContent = "ไม่สามารถเข้าถึงไมค์ได้";
     return;
+  }
+
+  state.micReady = true;
+  // ถ้ามีรายชื่อ peers มาถึงตั้งแต่ก่อนไมค์พร้อม ให้เปิดการเชื่อมต่อ
+  // ตอนนี้เลย (ตอนนี้เสียงตัวเองพร้อมแนบไปในการเจรจาแล้ว)
+  if (state.pendingPeerNames) {
+    syncPeers(state.pendingPeerNames);
+    state.pendingPeerNames = null;
   }
 
   state.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -303,6 +319,9 @@ function createPeer(name, isInitiator) {
       audioEl = document.createElement("audio");
       audioEl.id = `audio-${name}`;
       audioEl.autoplay = true;
+      // เริ่มต้นปิดเสียงไว้ก่อนเสมอ จนกว่าจะรู้ตำแหน่งทั้งสองฝ่ายแน่ชัด
+      // ว่าอยู่ในระยะที่ได้ยิน (กันปัญหาได้ยินเสียงทั้งที่ยังไม่ควรได้ยิน)
+      audioEl.volume = 0;
       document.body.appendChild(audioEl);
     }
     audioEl.srcObject = e.streams[0];
@@ -353,16 +372,26 @@ function closePeer(name) {
 // TODO: ตอนนี้เป็น logic แบบง่าย (เทียบระยะห่างตรง ๆ ไม่รวม dimension)
 // ถ้าต้องการความแม่นยำระดับ production ควรเทียบ dimension ด้วยและ
 // ทำ interpolation ตำแหน่งระหว่างแพ็กเก็ตที่ได้รับ
+//
+// สำคัญ: ค่าเริ่มต้นต้อง "ปิดเสียง" เสมอเมื่อไม่รู้ตำแหน่งฝ่ายใดฝ่ายหนึ่ง
+// แน่ชัด (เช่นยังไม่ได้เข้าเกม/ยังไม่ขยับ) ห้ามปล่อยเสียงเต็มไว้เป็น
+// ค่าเริ่มต้นเด็ดขาด เพราะจะทำให้ได้ยินเสียงคนที่ไม่ควรได้ยิน
 function updateSpatialVolumes() {
   const me = state.positions[state.playerName];
-  if (!me) return;
-  const hearDist = Number(els.hearDistance.value);
-  const hearVol = Number(els.hearVolume.value) / 100;
 
-  for (const [name, pc] of state.peers.entries()) {
-    const other = state.positions[name];
+  for (const [name] of state.peers.entries()) {
     const audioEl = document.getElementById(`audio-${name}`);
-    if (!other || !audioEl) continue;
+    if (!audioEl) continue;
+
+    const other = state.positions[name];
+    // ไม่รู้ตำแหน่งตัวเอง หรือไม่รู้ตำแหน่งอีกฝ่าย -> ปิดเสียงไว้ก่อน
+    if (!me || !other) {
+      audioEl.volume = 0;
+      continue;
+    }
+
+    const hearDist = Number(els.hearDistance.value);
+    const hearVol = Number(els.hearVolume.value) / 100;
     const dx = me.x - other.x, dy = me.y - other.y, dz = me.z - other.z;
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
     const falloff = Math.max(0, 1 - dist / hearDist);
@@ -392,6 +421,8 @@ function resetAll() {
   state.code = "";
   state.playerName = "";
   state.muted = false;
+  state.micReady = false;
+  state.pendingPeerNames = null;
   state.positions = {};
 
   els.codeInput.value = "";
