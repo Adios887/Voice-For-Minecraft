@@ -95,10 +95,35 @@ const server = app.listen(process.env.PORT || 3000, () => {
 
 // เซิร์ฟเวอร์ที่สอง: เฉพาะ Minecraft เท่านั้น -> เป็น ws ธรรมดา ไม่มี TLS
 // MC_PORT ต้องถูกตั้งเป็นพอร์ตที่ TCP Proxy ของโฮสต์ (เช่น Railway) ชี้มาให้
+// แนะนำให้ตั้งค่า MC_PORT เป็น Environment Variable บน Railway เองเสมอ
+// (อย่าปล่อยให้ใช้ค่าเริ่มต้นเฉย ๆ) เพื่อกันไม่ให้บังเอิญไปตรงกับพอร์ต
+// ที่ Railway สุ่มให้ตัวแปร PORT ของเว็บไซต์หลัก (เคยเกิดปัญหานี้มาแล้ว
+// หลายครั้ง เพราะพอร์ตที่ Railway สุ่มให้ไม่คงที่ในแต่ละครั้งที่ deploy)
 const mcHttpServer = http.createServer();
-const MC_PORT = process.env.MC_PORT || 3002;
+let MC_PORT = Number(process.env.MC_PORT) || 8081;
+const websitePort = Number(process.env.PORT) || 3000;
+if (MC_PORT === websitePort) {
+  console.warn(
+    `[คำเตือน] MC_PORT (${MC_PORT}) ชนกับพอร์ตเว็บไซต์หลัก (${websitePort}) พอดี ` +
+      `ปรับ MC_PORT ชั่วคราวเป็น ${MC_PORT + 1} ให้อัตโนมัติ - ` +
+      `แต่ควรตั้งค่า MC_PORT เป็น Environment Variable บน Railway ให้ชัดเจน ` +
+      `แล้วอัปเดต Target Port ของ TCP Proxy ให้ตรงกันด้วย`
+  );
+  MC_PORT += 1;
+}
+
 mcHttpServer.listen(MC_PORT, () => {
   console.log(`My Voice Chat backend (Minecraft) กำลังทำงานที่พอร์ต ${MC_PORT}`);
+});
+
+// ถ้าพอร์ตนี้เปิดไม่สำเร็จไม่ว่าด้วยเหตุผลใด (เช่นชนกับพอร์ตอื่นอีก)
+// ห้ามปล่อยให้ทั้งโปรเซสพัง (crash) - เว็บไซต์หลักต้องยังใช้งานได้ต่อไป
+// แค่ฝั่ง Minecraft จะเชื่อมต่อไม่ได้ชั่วคราว พร้อม log แจ้งเตือนชัดเจน
+mcHttpServer.on("error", (err) => {
+  console.error(
+    `[ผิดพลาด] เปิดพอร์ต Minecraft (${MC_PORT}) ไม่สำเร็จ: ${err.message} ` +
+      `- เว็บไซต์ยังทำงานได้ปกติ แต่ Minecraft จะเชื่อมต่อไม่ได้จนกว่าจะแก้`
+  );
 });
 
 const wssMc = new WebSocketServer({ noServer: true });
