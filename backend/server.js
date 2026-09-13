@@ -184,6 +184,33 @@ function pollWorldId(mcSocket, onFound) {
   });
 }
 
+// ถามตำแหน่งผู้เล่นแต่ละคน "แบบเจาะจงชื่อ" ด้วยคำสั่ง querytarget เป็น
+// ระยะ ๆ (แทนที่จะรอ event "PlayerTravelled" ซึ่งทำงานเฉพาะตอนมีการ
+// ขยับตัวเท่านั้น - ถ้ายืนนิ่งคุยกันเฉย ๆ จะไม่มีข้อมูลตำแหน่งส่งมาเลย
+// ทำให้เสียงเงียบค้าง) querytarget คืนตำแหน่งได้แม้ผู้เล่นยืนนิ่งอยู่
+function pollPositions(session) {
+  for (const name of session.siteSockets.keys()) {
+    const safeName = name.replace(/"/g, '\\"');
+    sendCommand(session.mcSocket, `querytarget @a[name="${safeName}"]`, (body) => {
+      try {
+        const arr = JSON.parse(body?.statusMessage || "[]");
+        const p = arr[0];
+        if (p?.position) {
+          session.positions[name] = {
+            x: p.position.x,
+            y: p.position.y,
+            z: p.position.z,
+            dimension: p.dimension,
+          };
+          broadcastToSite(session, { type: "positions", positions: session.positions });
+        }
+      } catch {
+        // ผู้เล่นคนนี้อาจยังไม่ได้เข้าเกม/ออกจากระยะแล้ว - ข้ามไปเฉย ๆ
+      }
+    });
+  }
+}
+
 // ------------------------------------------------------------------
 // การเชื่อมต่อจากฝั่ง Minecraft (/wsserver ws://.../)
 // ------------------------------------------------------------------
@@ -193,8 +220,6 @@ wssMc.on("connection", (mcSocket) => {
   let session = null;
 
   console.log("[mc] มีการเชื่อมต่อเข้ามา กำลังรอ worldId...");
-
-  subscribeEvent(mcSocket, "PlayerTravelled");
 
   sendCommand(
     mcSocket,
@@ -222,6 +247,9 @@ wssMc.on("connection", (mcSocket) => {
       mcSocket,
       `tellraw @a {"rawtext":[{"text":"§b[MyVoiceChat] §fรหัสเชื่อมต่อเว็บไซต์ของคุณคือ: §e§l${entry.code}"}]}`
     );
+
+    // เริ่มถามตำแหน่งผู้เล่นทุก 2 วินาที (ดูฟังก์ชัน pollPositions ด้านบน)
+    session.positionIntervalId = setInterval(() => pollPositions(session), 2000);
   }
 
   // ยิงถามซ้ำทุก 2 วินาที จนกว่าจะได้ worldId (behavior pack อาจยัง
@@ -255,26 +283,14 @@ wssMc.on("connection", (mcSocket) => {
       return;
     }
 
-    const eventName = msg.body?.eventName;
-
-    // ตำแหน่งผู้เล่น -> เก็บไว้เพื่อคำนวณ proximity แล้วส่งให้เว็บไซต์
-    if (eventName === "PlayerTravelled" && session) {
-      const p = msg.body.player;
-      if (p?.name) {
-        session.positions[p.name] = {
-          x: p.position?.x,
-          y: p.position?.y,
-          z: p.position?.z,
-          dimension: msg.body.dimension,
-        };
-        broadcastToSite(session, { type: "positions", positions: session.positions });
-      }
-    }
+    // (ระบบตำแหน่งเปลี่ยนไปใช้การ "ถามเป็นระยะ" ผ่าน pollPositions()
+    // แทน event PlayerTravelled แล้ว ดูฟังก์ชัน pollPositions ด้านบน)
   });
 
   mcSocket.on("close", () => {
     if (session) {
       console.log(`[mc] หลุดการเชื่อมต่อ -> รหัส ${session.mcSocket.sessionCode}`);
+      clearInterval(session.positionIntervalId);
       broadcastToSite(session, { type: "disconnected" });
       sessions.delete(mcSocket.sessionCode);
     }
